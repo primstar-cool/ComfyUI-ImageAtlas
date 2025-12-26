@@ -605,9 +605,13 @@ def create_png_with_custom_chunk(image: Image.Image, chunk_type: str, chunk_data
     """
     创建带有自定义块的PNG文件
     """
-    # 先将图片保存为PNG
+    # 确保是 RGBA 模式（32-bit，保留半透明）
+    if image.mode != 'RGBA':
+        image = image.convert('RGBA')
+    
+    # 先将图片保存为PNG（禁用优化，保持 32-bit RGBA 半透明）
     buffer = io.BytesIO()
-    image.save(buffer, format='PNG')
+    image.save(buffer, format='PNG', optimize=False, compress_level=6)
     png_data = buffer.getvalue()
     
     # PNG文件结构：
@@ -1013,8 +1017,8 @@ class ImageAtlasSaveNode:
             with open(filepath, 'wb') as f:
                 f.write(png_bytes)
         else:
-            # 没有元数据，普通保存
-            img_pil.save(filepath, 'PNG')
+            # 没有元数据，普通保存（禁用优化，保持 32-bit RGBA 半透明）
+            img_pil.save(filepath, 'PNG', optimize=False, compress_level=6)
         
         return (filename,)
 
