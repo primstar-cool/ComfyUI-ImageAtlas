@@ -1,0 +1,6 @@
+# ComfyUI-ImageAtlas 依赖
+# 大部分依赖已包含在ComfyUI中
+numpy
+Pillow
+torch
+
