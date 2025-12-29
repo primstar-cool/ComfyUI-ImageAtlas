@@ -923,6 +923,10 @@ class ImageAtlasSaveNode:
     将地图集保存为带有自定义块的PNG文件
     """
     
+    def __init__(self):
+        self.output_dir = None
+        self.type = "output"
+    
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -934,8 +938,7 @@ class ImageAtlasSaveNode:
             },
         }
     
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("filename",)
+    RETURN_TYPES = ()
     FUNCTION = "save_atlas"
     OUTPUT_NODE = True
     CATEGORY = "image/atlas"
@@ -952,13 +955,14 @@ class ImageAtlasSaveNode:
             metadata_format: 元数据格式 (aTLS/aTLZ)
         
         Returns:
-            filename: 保存的文件名
+            ui dict with images list for preview
         """
         import os
         import json
         import folder_paths
         
         output_dir = folder_paths.get_output_directory()
+        self.output_dir = output_dir
         
         # 解析元数据
         metadata_list = json.loads(atlas_json) if atlas_json else []
@@ -974,14 +978,12 @@ class ImageAtlasSaveNode:
         
         img_pil = Image.fromarray(img_np, 'RGBA')
         
-        # 生成文件名
-        counter = 0
-        while True:
-            filename = f"{filename_prefix}_{counter:05d}.png"
-            filepath = os.path.join(output_dir, filename)
-            if not os.path.exists(filepath):
-                break
-            counter += 1
+        # 生成文件名（使用 ComfyUI 标准方式）
+        full_output_folder, filename_base, counter, subfolder, filename_prefix_parsed = \
+            folder_paths.get_save_image_path(filename_prefix, output_dir, img_np.shape[1], img_np.shape[0])
+        
+        filename = f"{filename_prefix_parsed}_{counter:05d}.png"
+        filepath = os.path.join(full_output_folder, filename)
         
         # 创建块数据
         if metadata_list:
@@ -1016,7 +1018,14 @@ class ImageAtlasSaveNode:
             # 没有元数据，普通保存
             img_pil.save(filepath, 'PNG')
         
-        return (filename,)
+        # 返回符合 ComfyUI 规范的 UI 结果，以便在线平台正确识别输出
+        results = [{
+            "filename": filename,
+            "subfolder": subfolder,
+            "type": self.type
+        }]
+        
+        return {"ui": {"images": results}}
 
 
 class ImageAtlasExtractNode:
