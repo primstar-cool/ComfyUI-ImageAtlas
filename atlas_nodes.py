@@ -10,7 +10,9 @@ from PIL import Image
 import io
 import struct
 import zlib
+import os
 from typing import List, Tuple, Optional
+import folder_paths
 
 
 class RectangleArgs:
@@ -43,7 +45,194 @@ class RectangleArgs:
 
 
 class FloorPlane:
-    """地板扫描纹理打包算法"""
+    """地板扫描纹理打包算法（自适应宽度版本）
+    
+    第二行往回走时，使用第一行实际宽度+gap对齐后的结果作为行宽度
+    """
+    
+    def __init__(self):
+        self.rect_array: List[RectangleArgs] = []
+        self.height_array: List[int] = []
+        self.start_x = 0
+        self.is_left_align = True
+        self.width_line_sum = 0
+        self.mode_switch = 0
+        self.adaptive_width = 0  # 自适应宽度（第一行宽度对齐后）
+        self.first_row_done = False
+    
+    def deal_rectangle_args_array(self, a_rect_array: List[RectangleArgs], 
+                                   max_width: int, gap: int = 1,
+                                   size_align: str = "mul4") -> List[RectangleArgs]:
+        """处理矩形数组，进行打包布局"""
+        # 克隆并排序
+        self.rect_array = [r.clone() for r in a_rect_array]
+        self.rect_array.sort(key=lambda r: (r.height, r.width), reverse=True)
+        
+        # 添加间隙
+        if gap:
+            for rect in self.rect_array:
+                rect.width += gap
+                rect.height += gap
+        
+        # 执行地板扫描算法（自适应宽度版本）
+        self._floorplane_adaptive(max_width, gap, size_align)
+        
+        # 移除间隙
+        if gap:
+            for rect in self.rect_array:
+                rect.width -= gap
+                rect.height -= gap
+        
+        return self.rect_array
+    
+    def _count_max_h(self, width: int, start: int) -> int:
+        """计算指定范围内的最大高度"""
+        end = start + width
+        max_h = self.height_array[start]
+        for i in range(start + 1, end):
+            if max_h < self.height_array[i]:
+                max_h = self.height_array[i]
+        return max_h
+    
+    def _find_min_h_left(self, width: int) -> Tuple[int, int]:
+        """从左到右找最小高度位置"""
+        length = len(self.height_array) - width
+        min_x = 0
+        min_h = 99999999
+        
+        for i in range(length):
+            h = self._count_max_h(width, i)
+            if h < min_h:
+                min_x = i
+                min_h = h
+        
+        return min_x, min_h
+    
+    def _find_min_h_right(self, width: int) -> Tuple[int, int]:
+        """从右到左找最小高度位置"""
+        length = len(self.height_array) - width
+        min_x = 0
+        min_h = 99999999
+        
+        for i in range(length - 1, -1, -1):
+            h = self._count_max_h(width, i)
+            if h < min_h:
+                min_x = i
+                min_h = h
+        
+        return min_x, min_h
+    
+    @staticmethod
+    def _align_width(val: int, size_align: str) -> int:
+        """对齐宽度到指定倍数"""
+        if "mul4" in size_align:
+            return ((val + 3) // 4) * 4
+        elif "mul2" in size_align:
+            return ((val + 1) // 2) * 2
+        elif "pow2" in size_align:
+            if val <= 0:
+                return 1
+            power = 1
+            while power < val:
+                power *= 2
+            return power
+        return val
+    
+    def _floorplane_adaptive(self, max_width: int, gap: int, size_align: str):
+        """自适应宽度地板扫描打包算法
+        
+        第二行往回走时，使用第一行宽度+gap对齐后的结果作为新行宽度
+        """
+        total = len(self.rect_array)
+        mode1 = 1
+        
+        self.height_array = [0] * max_width
+        self.start_x = 0
+        self.is_left_align = True
+        self.width_line_sum = 0
+        self.first_row_done = False
+        self.adaptive_width = max_width  # 初始使用最大宽度
+        
+        import math
+        self.mode_switch = int(math.log2(max_width)) if max_width > 0 else 0
+        
+        bi = 0
+        while bi < total:
+            rect = self.rect_array[bi]
+            current_max_width = self.adaptive_width if self.first_row_done else max_width
+            
+            if self.width_line_sum + rect.width > current_max_width:
+                rest_space = current_max_width - self.width_line_sum
+                
+                # 尝试找一个能放进剩余空间的小矩形
+                for bi2 in range(bi + 1, total):
+                    if self.rect_array[bi2].width <= rest_space:
+                        rect2 = self.rect_array.pop(bi2)
+                        self.rect_array.insert(bi, rect2)
+                        break
+                
+                if rect != self.rect_array[bi]:
+                    continue
+                else:
+                    # 第一行结束，计算自适应宽度
+                    if not self.first_row_done:
+                        # 第一行实际宽度（已包含每个图片的 gap），然后对齐
+                        first_row_width = self.width_line_sum
+                        self.adaptive_width = self._align_width(first_row_width, size_align)
+                        # 确保不超过 max_width
+                        self.adaptive_width = min(self.adaptive_width, max_width)
+                        # 调整 height_array 到新宽度
+                        self.height_array = self.height_array[:self.adaptive_width]
+                        self.first_row_done = True
+                    
+                    self.is_left_align = not self.is_left_align
+                    self.width_line_sum = 0
+                    self.start_x = 0 if self.is_left_align else self.adaptive_width
+                    continue
+            else:
+                bi += 1
+                self.width_line_sum += rect.width
+                
+                if total - bi < self.mode_switch:
+                    mode1 = 0
+                
+                if mode1:
+                    if self.is_left_align:
+                        start_height = self._count_max_h(rect.width, self.start_x)
+                        start_x = self.start_x
+                        self.start_x += rect.width
+                    else:
+                        effective_width = self.adaptive_width if self.first_row_done else max_width
+                        start_x_candidate = self.start_x - rect.width
+                        if start_x_candidate >= 0:
+                            start_height = self._count_max_h(rect.width, start_x_candidate)
+                            start_x = start_x_candidate
+                            self.start_x -= rect.width
+                        else:
+                            start_x = 0
+                            start_height = self._count_max_h(rect.width, 0)
+                            self.start_x = rect.width
+                else:
+                    if self.is_left_align:
+                        start_x, start_height = self._find_min_h_left(rect.width)
+                    else:
+                        start_x, start_height = self._find_min_h_right(rect.width)
+                
+                rect.x = start_x
+                rect.y = start_height
+                x_max = start_x + rect.width
+                h_max = start_height + rect.height
+                
+                effective_width = self.adaptive_width if self.first_row_done else max_width
+                for i in range(start_x, min(x_max, effective_width)):
+                    self.height_array[i] = h_max
+
+
+class FloorPlaneFixedWidth:
+    """地板扫描纹理打包算法（固定宽度版本）
+    
+    所有行都使用固定的 max_width
+    """
     
     def __init__(self):
         self.rect_array: List[RectangleArgs] = []
@@ -66,7 +255,7 @@ class FloorPlane:
                 rect.width += gap
                 rect.height += gap
         
-        # 执行地板扫描算法
+        # 执行地板扫描算法（固定宽度版本）
         self._floorplane(max_width)
         
         # 移除间隙
@@ -115,7 +304,7 @@ class FloorPlane:
         return min_x, min_h
     
     def _floorplane(self, max_width: int):
-        """地板扫描打包算法主体"""
+        """地板扫描打包算法主体（固定宽度版本）"""
         total = len(self.rect_array)
         mode1 = 1
         
@@ -718,7 +907,8 @@ class ImageAtlasNode:
                     "display": "number"
                 }),
                 "algorithm": ([
-                    "Shelf (架子算法)",
+                    "Shelf (架子算法-自适应宽度)",
+                    "Shelf-FixedWidth (架子算法-固定宽度)",
                     "MaxRects-BSSF (最短边适配)",
                     "MaxRects-BLSF (最长边适配)",
                     "MaxRects-BAF (最佳面积适配)",
@@ -815,9 +1005,14 @@ class ImageAtlasNode:
             rect_list.append(rect)
         
         # 根据选择的算法进行打包
-        if "Shelf" in algorithm:
-            packer = FloorPlane()
+        if "Shelf-FixedWidth" in algorithm:
+            # 固定宽度版本的 Shelf 算法
+            packer = FloorPlaneFixedWidth()
             packed_rects = packer.deal_rectangle_args_array(rect_list, max_width, gap)
+        elif "Shelf" in algorithm:
+            # 自适应宽度版本的 Shelf 算法（默认）
+            packer = FloorPlane()
+            packed_rects = packer.deal_rectangle_args_array(rect_list, max_width, gap, size_align)
         elif "MaxRects" in algorithm:
             packer = MaxRects()
             if "BSSF" in algorithm:
@@ -836,9 +1031,9 @@ class ImageAtlasNode:
             packer = Guillotine()
             packed_rects = packer.deal_rectangle_args_array(rect_list, max_width, gap)
         else:
-            # 默认使用 Shelf
+            # 默认使用 Shelf（自适应宽度）
             packer = FloorPlane()
-            packed_rects = packer.deal_rectangle_args_array(rect_list, max_width, gap)
+            packed_rects = packer.deal_rectangle_args_array(rect_list, max_width, gap, size_align)
         
         # 计算最终尺寸
         atlas_width = 0
@@ -928,8 +1123,10 @@ class ImageAtlasSaveNode:
     """
     
     def __init__(self):
-        self.output_dir = None
+        self.output_dir = folder_paths.get_output_directory()
         self.type = "output"
+        self.prefix_append = ""
+        self.compress_level = 6
     
     @classmethod
     def INPUT_TYPES(cls):
@@ -940,15 +1137,21 @@ class ImageAtlasSaveNode:
                 "filename_prefix": ("STRING", {"default": "atlas"}),
                 "metadata_format": (["aTLS (明文)", "aTLZ (二进制)"],),
             },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO"
+            },
         }
     
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("filename",)
     FUNCTION = "save_atlas"
     OUTPUT_NODE = True
     CATEGORY = "image/atlas"
     
     def save_atlas(self, atlas_image: torch.Tensor, atlas_json: str,
-                   filename_prefix: str, metadata_format: str):
+                   filename_prefix: str, metadata_format: str,
+                   prompt=None, extra_pnginfo=None):
         """
         保存纹理地图集
         
@@ -957,16 +1160,17 @@ class ImageAtlasSaveNode:
             atlas_json: 元数据JSON字符串
             filename_prefix: 文件名前缀
             metadata_format: 元数据格式 (aTLS/aTLZ)
+            prompt: ComfyUI prompt 信息（用于云端平台）
+            extra_pnginfo: 额外的 PNG 信息（用于云端平台）
         
         Returns:
             ui dict with images list for preview
         """
-        import os
         import json
-        import folder_paths
         
-        output_dir = folder_paths.get_output_directory()
-        self.output_dir = output_dir
+        # 获取输出目录并确保存在
+        self.output_dir = folder_paths.get_output_directory()
+        os.makedirs(self.output_dir, exist_ok=True)
         
         # 解析元数据
         metadata_list = json.loads(atlas_json) if atlas_json else []
@@ -984,7 +1188,10 @@ class ImageAtlasSaveNode:
         
         # 生成文件名（使用 ComfyUI 标准方式）
         full_output_folder, filename_base, counter, subfolder, filename_prefix_parsed = \
-            folder_paths.get_save_image_path(filename_prefix, output_dir, img_np.shape[1], img_np.shape[0])
+            folder_paths.get_save_image_path(filename_prefix, self.output_dir, img_np.shape[1], img_np.shape[0])
+        
+        # 确保输出目录存在（云端平台必需）
+        os.makedirs(full_output_folder, exist_ok=True)
         
         filename = f"{filename_prefix_parsed}_{counter:05d}.png"
         filepath = os.path.join(full_output_folder, filename)
@@ -1029,7 +1236,7 @@ class ImageAtlasSaveNode:
             "type": self.type
         }]
         
-        return {"ui": {"images": results}}
+        return {"ui": {"images": results}, "result": (filepath,)}
 
 
 class ImageAtlasExtractNode:
