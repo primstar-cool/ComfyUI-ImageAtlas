@@ -790,9 +790,15 @@ def find_opaque_bounds(image: np.ndarray, trim_mode: str = "auto",
     return int(x_min), int(y_min), int(x_max - x_min + 1), int(y_max - y_min + 1)
 
 
-def create_png_with_custom_chunk(image: Image.Image, chunk_type: str, chunk_data: bytes) -> bytes:
+def create_png_with_custom_chunk(image: Image.Image, chunk_type: str, chunk_data: bytes, pnginfo=None) -> bytes:
     """
     创建带有自定义块的PNG文件
+    
+    Args:
+        image: PIL Image 对象
+        chunk_type: 自定义块类型（如 'aTLS', 'aTLZ'）
+        chunk_data: 自定义块数据
+        pnginfo: PNG metadata 信息（用于存储 prompt/workflow）
     """
     # 确保是 RGBA 模式（32-bit，保留半透明）
     if image.mode != 'RGBA':
@@ -800,7 +806,7 @@ def create_png_with_custom_chunk(image: Image.Image, chunk_type: str, chunk_data
     
     # 先将图片保存为PNG（禁用优化，保持 32-bit RGBA 半透明）
     buffer = io.BytesIO()
-    image.save(buffer, format='PNG', optimize=False, compress_level=6)
+    image.save(buffer, format='PNG', optimize=False, compress_level=6, pnginfo=pnginfo)
     png_data = buffer.getvalue()
     
     # PNG文件结构：
@@ -1167,6 +1173,7 @@ class ImageAtlasSaveNode:
             ui dict with images list for preview
         """
         import json
+        from PIL.PngImagePlugin import PngInfo
         
         # 获取输出目录并确保存在
         self.output_dir = folder_paths.get_output_directory()
@@ -1185,6 +1192,14 @@ class ImageAtlasSaveNode:
             img_np = np.concatenate([img_np, alpha], axis=2)
         
         img_pil = Image.fromarray(img_np, 'RGBA')
+        
+        # 创建 PNG metadata（用于存储 prompt/workflow，支持工作流还原）
+        pnginfo = PngInfo()
+        if prompt is not None:
+            pnginfo.add_text("prompt", json.dumps(prompt))
+        if extra_pnginfo is not None:
+            for key in extra_pnginfo:
+                pnginfo.add_text(key, json.dumps(extra_pnginfo[key]))
         
         # 生成文件名（使用 ComfyUI 标准方式）
         full_output_folder, filename_base, counter, subfolder, filename_prefix_parsed = \
@@ -1220,14 +1235,14 @@ class ImageAtlasSaveNode:
                     )
                 chunk_type = 'aTLZ'
             
-            # 创建带自定义块的PNG
-            png_bytes = create_png_with_custom_chunk(img_pil, chunk_type, chunk_data)
+            # 创建带自定义块的PNG（同时包含 pnginfo 用于工作流还原）
+            png_bytes = create_png_with_custom_chunk(img_pil, chunk_type, chunk_data, pnginfo)
             
             with open(filepath, 'wb') as f:
                 f.write(png_bytes)
         else:
-            # 没有元数据，普通保存（禁用优化，保持 32-bit RGBA 半透明）
-            img_pil.save(filepath, 'PNG', optimize=False, compress_level=6)
+            # 没有元数据，普通保存（禁用优化，保持 32-bit RGBA 半透明，包含 pnginfo）
+            img_pil.save(filepath, 'PNG', optimize=False, compress_level=6, pnginfo=pnginfo)
         
         # 返回符合 ComfyUI 规范的 UI 结果，以便在线平台正确识别输出
         results = [{
